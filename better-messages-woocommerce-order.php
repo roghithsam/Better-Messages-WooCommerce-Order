@@ -14,10 +14,6 @@
 
 defined( 'ABSPATH' ) || exit;
 
-if ( ! class_exists( 'WooCommerce' ) || ! class_exists( 'Better_Messages' ) ) {
-    exit;
-}
-
 if ( ! class_exists( 'Better_Messages_WooOrder' ) ) {
 
 	class Better_Messages_WooOrder
@@ -64,73 +60,41 @@ if ( ! class_exists( 'Better_Messages_WooOrder' ) ) {
 
 		}
 
-		public function bp_trash_order($order_id){
+		public function bp_trash_order( $order_id ) {
+            $this->update_thread_on_order_status_change( $order_id, true );
 
-			$unique_key_check = 'wooorder_'.$order_id;
+        }
 
-			$thread_id = $this->get_unique_conversation_id_only($unique_key_check);
+        public function bp_untrash_order( $order_id ) {
+            $this->update_thread_on_order_status_change( $order_id, false );
+        }
 
-			if ( $thread_id > 0) { 
+        public function bp_delete_order( $order_id ) {
+            $unique_key = 'wooorder_' . $order_id;
+            $thread_id = $this->get_unique_conversation_id_only( $unique_key );
+            if ( $thread_id > 0 ) {
+                Better_Messages()->functions->erase_thread( $thread_id );        
+            }
+        }
 
-				// Returns array of user ids (int), returns empty array if no participants or thread not exists
-				$user_ids = Better_Messages()->functions->get_recipients_ids( $thread_id );
-
-				if($user_ids){
-
-					foreach($user_ids as $user_id){
-
-						Better_Messages()->functions->archive_thread( $user_id, $thread_id );		
-
-					}
-				}
-				
-			}
-
-		}
-
-		public function bp_untrash_order($order_id){
-
-			$unique_key_check = 'wooorder_'.$order_id;
-
-			$thread_id = $this->get_unique_conversation_id_only($unique_key_check);
-
-			if ( $thread_id > 0) { 
-
-				// Returns array of user ids (int), returns empty array if no participants or thread not exists
-				$user_ids = Better_Messages()->functions->get_recipients_ids( $thread_id );
-
-				if($user_ids){
-
-					global $wpdb;
-			        
-		            $time = Better_Messages()->functions->get_microtime();
-
-		            // Mark messages as undeleted
-					foreach($user_ids as $user_id){
-
-						$wpdb->query( $wpdb->prepare( "UPDATE " . bm_get_table('recipients') . " SET is_deleted = 0, last_update = %d WHERE thread_id = %d AND user_id = %d", $time, $thread_id, $user_id ) );
-
-			            do_action( 'better_messages_thread_updated', $thread_id );			  
-				   
-					}
-				}
-				
-			}
-
-		}
-
-		public function bp_delete_order($order_id){
-
-			$unique_key = 'wooorder_'.$order_id;
-
-			$thread_id = $this->get_unique_conversation_id_only($unique_key);
-
-			if ( $thread_id > 0) { 
-
-				Better_Messages()->functions->erase_thread( $thread_id );		
-			}
-
-		}
+        private function update_thread_on_order_status_change( $order_id, $archive = true ) {
+            $unique_key = 'wooorder_' . $order_id;
+            $thread_id = $this->get_unique_conversation_id_only( $unique_key );
+            if ( $thread_id > 0 ) {
+                $user_ids = Better_Messages()->functions->get_recipients_ids( $thread_id );
+                if ( $user_ids ) {
+                    foreach ( $user_ids as $user_id ) {
+                        if ( $archive ) {
+                            Better_Messages()->functions->archive_thread( $user_id, $thread_id );
+                        } else {
+                            global $wpdb;
+                            $wpdb->query( $wpdb->prepare( "UPDATE " . bm_get_table( 'recipients' ) . " SET is_deleted = 0, last_update = %d WHERE thread_id = %d AND user_id = %d", Better_Messages()->functions->get_microtime(), $thread_id, $user_id ) );
+                            do_action( 'better_messages_thread_updated', $thread_id );
+                        }
+                    }
+                }
+            }
+        }
 
 		
 		public function wpsh_add_custom_chat_tab( $tabs ) {
@@ -214,255 +178,203 @@ if ( ! class_exists( 'Better_Messages_WooOrder' ) ) {
                 SELECT thread_meta.bm_thread_id FROM " . bm_get_table( 'threadsmeta' ) . " thread_meta WHERE `meta_key` = 'unique_tag' AND `meta_value` LIKE %s LIMIT 1", $unique_tag ) );
         }
 
-		public function thread_item( $thread_item, $thread_id, $thread_type, $include_personal, $user_id ){
-			if( $thread_type !== 'thread'){
-				return $thread_item;
-			}
+		public function thread_item( $thread_item, $thread_id, $thread_type, $include_personal, $user_id ) {
+            if ( $thread_type !== 'thread' ) {
+                return $thread_item;
+            }
 
-			$unique_tag = Better_Messages()->functions->get_thread_meta( $thread_id, 'unique_tag' );
+            $unique_tag = Better_Messages()->functions->get_thread_meta( $thread_id, 'unique_tag' );
+            if ( ! empty( $unique_tag ) && str_starts_with( $unique_tag, 'wooorder_' ) ) {
+                $parts = explode( '|', $unique_tag );
+                if ( isset( $parts[0] ) ) {
+                    $order_id = str_replace( 'wooorder_', '', $parts[0] );
+                    $thread_item['threadInfo'] .= $this->thread_info( $order_id );
 
-			if( ! empty( $unique_tag ) ){
-				if( str_starts_with( $unique_tag, 'wooorder_' ) ){
-					$parts = explode('|', $unique_tag);
-					if( isset( $parts[0] ) ){
-						$order_id = str_replace( 'wooorder_', '', $parts[0]);
-						$thread_info = '';
-						if( isset( $thread_item['threadInfo'] ) ) $thread_info = $thread_item['threadInfo'];
-						$thread_info .= $this->thread_info( $order_id );
-						$thread_item['threadInfo'] = $thread_info;
+                    $order = wc_get_order( $order_id );
+                    if ( ! $order ) return $thread_item;
 
+                    foreach ( $order->get_items() as $item ) {
+                        $product_id = $item->get_product_id();
+                        $product = wc_get_product( $product_id );
+                        $seller_id = get_post_field( 'post_author', $product_id );
+                        $image_src = wp_get_attachment_image_src( get_post_thumbnail_id( $product_id ), [ 100, 100 ] );
 
-						$order = wc_get_order($order_id);
+                        $thread_item['image'] = $image_src[0] ?? false;
 
-						//$product = wc_get_product( $product_id );
-						if( ! $order ) return '';
-
-
-						foreach ($order->get_items() as $item_id => $item) {
-							// Get product ID
-							$product_id = $item->get_product_id();
-							// Get product object
-							$product = wc_get_product($product_id);
-
-							// Get seller/user ID
-							$seller_id = get_post_field('post_author', $product_id);
-
-							// Get product image
-							$image_src = wp_get_attachment_image_src(get_post_thumbnail_id($product_id), [100, 100]);
-
-							$image         = false;
-							//$title  = $product->get_name();
-							// $url           = get_permalink($product_id);
-							// $price         = $product->get_price_html();
-
-							if( $image_src ){
-								$image = $image_src[0];
-							}
-
-							//  $thread_item['subject'] = $title;
-							// $thread_item['title'] = html_entity_decode($title );
-
-							// Overwrite subject
-							$thread_item['image'] = $image;
-
-							$sender_id  = get_current_user_id();
-							
-								
-							$content    = ' Your recent gift purchase is appreciated';
-							
-
-							/*$message_id = Better_Messages()->functions->new_message([
-								'sender_id'    => $sender_id,
-								'thread_id'    => $thread_id,
-								'content'      => $content,
-								'return'       => 'message_id',
-								'error_type'   => 'wp_error'
-							]);
-
-							if ( is_wp_error( $message_id ) ) {
-								$error = $message_id->get_error_message();
-								// Process error
-							} else {
-								// Message created
-								// var_dump( $message_id );
-							}*/
-
-						}
-					} 
-				}
-			}
-			return $thread_item;
-		}
+                        // Additional message logic can go here
+                    }
+                }
+            }
+            return $thread_item;
+        }
 
 		function vendor_user_meta( $item, $user_id, $include_personal ){
 			$item['url'] = false;
 			return $item;
 		}
 
-		public function thread_info( $order_id ) {
-		    if ( ! function_exists( 'wc_get_product' ) ) {
-		        return '';
-		    }
+		public function thread_info( $order_id ){
+			if( ! function_exists('wc_get_product') ) return '';
+			$order = wc_get_order($order_id);
+			if( ! $order ) return '';
 
-		    $order = wc_get_order( $order_id );
-		    if ( ! $order ) {
-		        return '';
-		    }
+			foreach ($order->get_items() as $item_id => $item) {
+				$product_id = $item->get_product_id();
+				$product = wc_get_product($product_id);
+				$image_src = wp_get_attachment_image_src(get_post_thumbnail_id($product_id), [100, 100]);
+				$image         = false;
+				$title  = $product->get_name();
+				$url           = get_permalink($product_id);
+				$price         = $product->get_price_html();
 
-		    $html = '';
-		    foreach ( $order->get_items() as $item ) {
-		        $product_id = $item->get_product_id();
-		        $product    = wc_get_product( $product_id );
-		        
-		        if ( ! $product ) {
-		            continue; // Skip if the product doesn't exist
-		        }
+				if( $image_src ){
+					$image = $image_src[0];
+				}
 
-		        $image_src = wp_get_attachment_image_src( get_post_thumbnail_id( $product_id ), [ 100, 100 ] );
-		        $image     = $image_src ? $image_src[0] : false;
-		        $title     = $product->get_name();
-		        $url       = get_permalink( $product_id );
-		        $price     = $product->get_price_html();
+				$html = '<div class="bm-product-info">';
 
-		        $html .= '<div class="bm-product-info">';
+				if( $image ){
+					$html .= '<div class="bm-product-image">';
+					$html .= '<a href="' . $url . '" target="_blank"><img src="' . $image . '" alt="' . $title . '" /></a>';
+					$html .= '</div>';
+				}
 
-		        // Product image
-		        if ( $image ) {
-		            $html .= '<div class="bm-product-image">';
-		            $html .= '<a href="' . esc_url( $url ) . '" target="_blank"><img src="' . esc_url( $image ) . '" alt="' . esc_attr( $title ) . '" /></a>';
-		            $html .= '</div>';
-		        }
+				$html .= '<div class="bm-product-details">';
+				$html .= '<div class="bm-product-title"><a href="' . $url . '" target="_blank">' . $title . '</a></div>';
+				$html .= '<div class="bm-product-price">' . $price . '</div>';
+				
+				$html .= '</div>';
+				if (current_user_can('shop_manager') || current_user_can('administrator')) {
+					$view_orders_page_link = $order->get_edit_order_url();
+				}else{
+					$view_orders_page_link = $order->get_view_order_url();
+				}
+				
+				$html .= '<div class="bm-product-button"><a href="' . esc_url($view_orders_page_link) . '" class="button">View Order</a>';
+					
 
-		        // Product details
-		        $html .= '<div class="bm-product-details">';
-		        $html .= '<div class="bm-product-title"><a href="' . esc_url( $url ) . '" target="_blank">' . esc_html( $title ) . '</a></div>';
-		        $html .= '<div class="bm-product-price">' . wp_kses_post( $price ) . '</div>';
-		        $html .= '</div>';
+				$html .= '</div>';
 
-		        // View order button
-		        $view_orders_page_link = current_user_can( 'shop_manager' ) || current_user_can( 'administrator' )
-		            ? $order->get_edit_order_url()
-		            : $order->get_view_order_url();
-
-		        $html .= '<div class="bm-product-button"><a href="' . esc_url( $view_orders_page_link ) . '" class="button">View Order</a></div>';
-		        $html .= '</div>'; // Closing bm-product-info
-		    }
-
-		    return $html;
+				return $html;
+			}
 		}
 
+		public function vieworder_page_contact_button($order_id){
 
-		public function vieworder_page_contact_button( $order_id ) {
-		    $unique_key = 'wooorder_' . $order_id;
-		    $thread_id = $this->get_unique_conversation_id_only( $unique_key );
+			$unique_key = 'wooorder_'.$order_id;
+			       
+			$thread_id = $this->get_unique_conversation_id_only($unique_key);
 
-		    if ( $thread_id > 0 ) {
-		        echo '<div class="custom-content">';
-		        echo '<h2>Chat Conversation</h2>';
-		        echo do_shortcode( '[better_messages_single_conversation thread_id="' . esc_attr( $thread_id ) . '"]' );
-		        echo '</div>';
-		    } else {
-		        ob_start();
-		        ?>
-		        <form method="post" action="<?php echo esc_url( $_SERVER['REQUEST_URI'] ); ?>">
-		            <?php wp_nonce_field( 'bm_support_fast_start_nonce', 'bm_support_fast_start_nonce' ); ?>
-		            <input type="hidden" name="bm_support_fast_start_unique_tag" value="<?php echo esc_attr( $order_id ); ?>">
-		            <input type="submit" value="Get Support" class="button">
-		        </form>
-		        <?php
-		        echo ob_get_clean();
-		    }
+            if( $thread_id > 0){
+            	echo '<div class="custom-content">';
+				echo '<h2>Chat Conversation</h2>';
+				echo do_shortcode('[better_messages_single_conversation thread_id="'.$thread_id.'"]');
+				echo '</div>';
+            } else{
+			        ob_start();
+						?>
+						<form method="post" action="<?php echo esc_url($_SERVER['REQUEST_URI']); ?>" >
+							<?php wp_nonce_field('bm_support_fast_start_nonce', 'bm_support_fast_start_nonce'); ?>
+							<input type="hidden" name="bm_support_fast_start_unique_tag" id="bm_support_fast_start_unique_tag" value="<?php echo $order_id; ?>">
+							<input type="submit" value="Get Support">
+						</form>
+						<?php
+						echo ob_get_clean();
+					}
+			
+				
 		}
-
 		
 		function handle_bm_support_fast_start_form_submission() {
-		    if (isset($_POST['bm_support_fast_start_nonce']) && wp_verify_nonce($_POST['bm_support_fast_start_nonce'], 'bm_support_fast_start_nonce')) {
-		        // Process form data
-		        $order_id = sanitize_text_field($_POST['bm_support_fast_start_unique_tag']);
-		        $order = wc_get_order($order_id);
+			if (isset($_POST['bm_support_fast_start_nonce']) && wp_verify_nonce($_POST['bm_support_fast_start_nonce'], 'bm_support_fast_start_nonce')) {
+				// Process form data
+				$order_id = sanitize_text_field($_POST['bm_support_fast_start_unique_tag']);
+				$order = wc_get_order( $order_id );
+ 			
+            if ( ! $order ) { wp_safe_redirect(esc_url($_SERVER['REQUEST_URI'])); exit;}
 
-		        if (!$order) {
-		            wp_safe_redirect(esc_url($_SERVER['REQUEST_URI']));
-		            exit; // Ensure exit after redirection
-		        }
+                $purchaser_id = $order->get_customer_id();
+				$current_user_id = get_current_user_id();
+				if($purchaser_id != $current_user_id){
+					wc_add_notice('Something Wrong.', 'error');
+					wp_safe_redirect(esc_url($_SERVER['REQUEST_URI'])); exit;
+				}
 
-		        $purchaser_id = $order->get_customer_id();
-		        $current_user_id = get_current_user_id();
+			if ($current_user_id) {
 
-		        if ($purchaser_id != $current_user_id) {
-		            wc_add_notice('Something went wrong.', 'error');
-		            wp_safe_redirect(esc_url($_SERVER['REQUEST_URI']));
-		            exit; // Ensure exit after redirection
-		        }
+				//$order = wc_get_order( $order_id );
+				foreach ( $order->get_items() as $item ) {
 
-		        if ($current_user_id) {
-		            foreach ($order->get_items() as $item) {
-		                $product_id = $item->get_product_id();
-		                $product = wc_get_product($product_id);
-		                $product_name = $product->get_name();
-		                $seller_id = get_post_field('post_author', $product_id);
+					$product_id = $item->get_product_id();
+                    $product = wc_get_product($product_id);
+                    $product_name = $product->get_name();
+                    $seller_id = get_post_field('post_author', $product_id);
+					if ($seller_id == $current_user_id ) {
+						wc_add_notice('Cannot Chat with Same User.', 'error');
+						wp_redirect(esc_url($_SERVER['REQUEST_URI']));exit;
+					}else if( $seller_id ) {
 
-		                if ($seller_id == $current_user_id) {
-		                    wc_add_notice('Cannot chat with the same user.', 'error');
-		                    wp_safe_redirect(esc_url($_SERVER['REQUEST_URI']));
-		                    exit; // Ensure exit after redirection
-		                } elseif ($seller_id) {
-		                    $user_ids = [$current_user_id, $seller_id];
-		                    $unique_key = 'wooorder_' . $order_id;
-		                    $subject = 'Support: ' . $product_name;
+				$user_ids   = [$current_user_id, $seller_id];
+				$unique_key = 'wooorder_'.$order_id;
 
-		                    $thread_id = Better_Messages()->functions->get_unique_conversation_id($user_ids, $unique_key, $subject);
+				// Subject will be used only if conversation not exists yet
+				$subject    = 'Support: '.$product_name;
 
-		                    if ($thread_id) {
-		                        // Redirect to the messages page or handle accordingly
-		                        wp_safe_redirect(esc_url($_SERVER['REQUEST_URI']));
-		                        exit; // Ensure exit after redirection
-		                    }
-		                }
-		            }
-		        }
-		    }
-		    // Redirect after submission if nonce is not valid
-		    wp_safe_redirect(esc_url($_SERVER['REQUEST_URI']));
-		    exit; // Ensure exit after redirection
+				$thread_id = Better_Messages()->functions->get_unique_conversation_id( $user_ids, $unique_key, $subject );
+			
+					if($thread_id){
+
+					//$url = Better_Messages()->functions->get_user_messages_url( $current_user_id, $thread_id );
+					//wp_redirect($url);
+					wp_redirect(esc_url($_SERVER['REQUEST_URI']));
+				 	exit();
+					}
+				}
+				}
+			}
+				// Optionally redirect after submission
+				 wp_redirect(esc_url($_SERVER['REQUEST_URI']));
+				 exit();
+			}
 		}
 
-
-		public function add_chat_box_metabox($post_type) {
-		    // Check if the post type is either the shop order screen or a single shop order
-		    if (in_array($post_type, [wc_get_page_screen_id('shop-order'), 'shop_order'], true)) {
-		        add_meta_box(
-		            'chat-box-information',
-		            __('Chat Conversation', 'WooOrder Integration'),
-		            [$this, 'show_chat_box_metabox'],
-		            $post_type,
-		            'advanced',
-		            'high'
-		        );
-		    }
+		public function add_chat_box_metabox( $post_type ) {
+			if ( in_array( $post_type, array( wc_get_page_screen_id( 'shop-order' ), 'shop_order' ), true ) ) {
+				add_meta_box( 
+					'chat-box-information', 
+					__( 'Chat Conversation', 'WooOrder Integration' ), 
+					array( $this, 'show_chat_box_metabox' ), 
+					$post_type, 
+					'advanced',
+					'high' );
+			}
 		}
 
-		public function show_chat_box_metabox($post) {
-		    $order_id = $post->get_id();
-		    $unique_key = 'wooorder_' . $order_id;
-		    $thread_id = $this->get_unique_conversation_id_only($unique_key);
+		public function show_chat_box_metabox( $post ) {
 
-		    // Enqueue necessary CSS and JS for Better Messages
-		    Better_Messages()->enqueue_css();
-		    Better_Messages()->enqueue_js();
+		  // $user_id  = get_current_user_id();
 
-		    echo '<div class="custom-content">';
-		    echo '<style>.bm-thread-info .bm-product-button { margin-left: auto; }</style>';
+			$order_id = $post->get_id();
+			$unique_key = 'wooorder_'.$order_id;
+			     
+			$thread_id = $this->get_unique_conversation_id_only($unique_key);
+			echo '<div class="custom-content">';
 
-		    if ($thread_id > 0) {
-		        echo Better_Messages()->functions->get_conversation_layout($thread_id);
-		    } else {
-		        echo 'No Conversations';
-		    }
-		    
-		    echo '</div>';
+            if( $thread_id > 0){
+
+            //$unread_count = Better_Messages()->functions->get_user_unread_messages( $user_id, $thread_id, $unread_count = true );
+
+			
+			echo '<style>.bm-thread-info .bm-product-button {margin-left:auto;}</style>';
+			Better_Messages()->enqueue_css();
+			Better_Messages()->enqueue_js();
+          	echo Better_Messages()->functions->get_conversation_layout($thread_id);
+			
+            }else{
+            	echo 'No Conversations';
+            }
+            echo '</div>';
 		}
-
 		
 		public function custom_function_on_order_processing( $order_id, $order ) {
 
@@ -569,6 +481,8 @@ if ( ! class_exists( 'Better_Messages_WooOrder' ) ) {
             }
 
         }
+		
 
 	}
+	Better_Messages_WooOrder::instance();
 }
